@@ -1,0 +1,286 @@
+#include "../inc/philo.h"
+
+int	philo_has_starved(t_philos *philo)
+{
+	long	curr;
+	int		has_starved;
+
+	curr = current_time();
+	pthread_mutex_lock(philo->lock_last_meal);
+	has_starved = (curr - philo->last_meal >= philo->time_to_die);
+	pthread_mutex_unlock(philo->lock_last_meal);
+	return (has_starved);
+}
+
+int	philo_has_died(t_philos *philo)
+{
+	int	already_dead;
+
+	pthread_mutex_lock(philo->table->lock_is_dead);
+	already_dead = *philo->is_dead;
+	if (!already_dead)
+	{
+		*philo->is_dead = 1;
+		pthread_mutex_unlock(philo->table->lock_is_dead);
+		print_state(philo, "died");
+		return (1);
+	}
+	pthread_mutex_unlock(philo->table->lock_is_dead);
+	return (0);
+}
+
+int	check_any_philo_dead(t_philos *philos)
+{
+	size_t	i;
+
+	i = 0;
+	while (i < philos[0].nb_of_philos)
+	{
+		pthread_mutex_lock(philos[0].table->lock_is_dead);
+		if (*philos[0].is_dead)
+		{
+			pthread_mutex_unlock(philos[0].table->lock_is_dead);
+			return (1);
+		}
+		pthread_mutex_unlock(philos[0].table->lock_is_dead);
+		if (philo_has_starved(&philos[i]))
+			return (philo_has_died(&philos[i]));
+		i++;
+	}
+	return (0);
+}
+
+int	are_all_philos_full(t_philos *philos)
+{
+	size_t	i;
+	int		full_count;
+
+	i = 0;
+	full_count = 0;
+	while (i < philos[0].nb_of_philos)
+	{
+		pthread_mutex_lock(philos[i].lock_meal_count);
+		if (philos[0].table->total_meal != -1 &&
+			philos[i].has_eaten >= philos[0].table->total_meal)
+			full_count++;
+		pthread_mutex_unlock(philos[i].lock_meal_count);
+		i++;
+	}
+	if (full_count == (int)philos[0].nb_of_philos)
+	{
+		pthread_mutex_lock(philos[0].table->lock_is_dead);
+		if (!*philos[0].is_dead)
+		{
+			*philos[0].is_dead = 1;
+			pthread_mutex_unlock(philos[0].table->lock_is_dead);
+			printf(PHILOS_FULL, philos->table->total_meal);
+		}
+		else
+			pthread_mutex_unlock(philos[0].table->lock_is_dead);
+		return (1);
+	}
+	return (0);
+}
+
+void	*state_checker(void *arg)
+{
+	t_philos	*philos = (t_philos *)arg;
+
+	while (1)
+	{
+		if (check_any_philo_dead(philos) || are_all_philos_full(philos))
+			break ;
+		helper_usleep(10);
+	}
+	return (NULL);
+}
+
+
+
+✅ À faire ailleurs dans ton projet (si pas déjà fait)
+Protéger les printf() concurrents via un mutex lock_print, sinon tu peux avoir des sorties imbriquées.
+
+Vérifier que toutes les structures partagées (is_dead, last_meal, has_eaten) sont accessibles uniquement via mutex.
+
+Si plusieurs threads appellent print_state, encapsule printf() dans une section critique.
+
+TJSSSSS LOCK DANS LE MEME SENS
+
+Tu pourrais inverser les deux pthread_mutex_lock() pour éviter le risque de deadlock si d'autres fonctions lock lock_is_dead avant mutex. Toujours locker dans le même ordre dans tout le projet.
+
+pthread_mutex_lock(philo->table->lock_is_dead);
+pthread_mutex_lock(&philo->table->mutex);
+...
+pthread_mutex_unlock(&philo->table->mutex);
+pthread_mutex_unlock(philo->table->lock_is_dead);
+
+-------
+
+🔍 2. dinner_begin() :
+✅ C’est correct :
+Tu crées tous les threads (philo + state_checker) après avoir initialisé les valeurs partagées (via init_starting_time()).
+
+Tu attends tous les threads via pthread_join() avant d’appeler dinner_over.
+
+⚠️ Point à surveiller :
+S’assurer que init_starting_time() initialise bien tous les champs partagés avant que le moindre thread les lise (sinon risque de race au lancement).
+
+🔍 3. dinner_over() :
+⚠️ Attention :
+Tu fais des destroy et free de mutex dynamiquement alloués sans vérifier que tous les threads sont terminés. Cependant, dans dinner_begin() tu fais bien les join, donc c’est sûr dans ce contexte précis.
+
+✅ Bonne pratique :
+Tu free() et destroy() chaque mutex proprement.
+
+Tu free() les locks dynamiques (lock_last_meal, etc.).
+
+✅ Conseil optionnel :
+Si tu veux vraiment bétonner la gestion mémoire :
+
+Mets à NULL les pointeurs après free() pour éviter les doubles free par erreur.
+
+Vérifie que les pthread_mutex_destroy() ne retournent pas une erreur (par sécurité).
+
+✅ Conclusion générale :
+Tu as bien géré :
+
+La synchronisation de l'affichage (print_state).
+
+La protection de *is_dead.
+
+Le démarrage/arrêt propre des threads (dinner_begin, dinner_over).
+
+L’accès à tous les champs partagés via des mutex appropriés.
+
+✅ Tu n’as plus de data races ici.
+Juste :
+
+Inverse l’ordre des lock dans print_state pour éviter un deadlock potentiel.
+
+Sois sûr que tous les malloc() pour les mutex sont OK et bien initialisés avant toute utilisation.
+
+Si tu veux, je peux relire routine() ou init_starting_time() pour te confirmer que tout est OK là aussi.
+
+-------------
+
+❌ Exemple dangereux (risque de deadlock) :
+Imaginons que tu as deux mutex : A et B.
+
+Thread 1 fait :
+
+c
+Copier
+Modifier
+pthread_mutex_lock(&A);
+pthread_mutex_lock(&B);
+Thread 2 fait :
+
+c
+Copier
+Modifier
+pthread_mutex_lock(&B);
+pthread_mutex_lock(&A);
+👉 Si Thread 1 lock A et attend B,
+pendant que Thread 2 lock B et attend A,
+alors plus aucun des deux ne pourra avancer : c’est un deadlock (blocage mutuel).
+
+✅ Solution sûre : toujours les verrouiller dans le même ordre
+Par exemple :
+
+Tu décides que l’ordre des mutex est toujours A → B
+
+Donc tous les threads doivent faire :
+
+c
+Copier
+Modifier
+pthread_mutex_lock(&A);
+pthread_mutex_lock(&B);
+/* section critique */
+pthread_mutex_unlock(&B);
+pthread_mutex_unlock(&A);
+🔁 Application à ton code
+Dans ta fonction print_state() tu as ceci :
+
+c
+Copier
+Modifier
+pthread_mutex_lock(&philo->table->mutex);
+pthread_mutex_lock(philo->table->lock_is_dead);
+Mais dans philo_has_died(), tu fais :
+
+c
+Copier
+Modifier
+pthread_mutex_lock(philo->table->lock_is_dead);
+/* ... */
+pthread_mutex_unlock(philo->table->lock_is_dead);
+print_state(...);
+Donc si print_state() re-lock mutex à l'intérieur, tu pourrais te retrouver dans une situation de deadlock si un thread a déjà lock_is_dead et l'autre a déjà mutex.
+
+✅ Pour être sûr :
+Tu dois choisir un ordre de verrouillage unique et cohérent partout. Par exemple :
+
+🔒 Toujours : lock_is_dead → mutex
+
+Alors, dans toutes les fonctions où tu dois locker les deux, tu fais :
+
+pthread_mutex_lock(philo->table->lock_is_dead);
+pthread_mutex_lock(&philo->table->mutex);
+/* ... */
+pthread_mutex_unlock(&philo->table->mutex);
+pthread_mutex_unlock(philo->table->lock_is_dead);
+📌 Résumé
+🔁 Toujours locker dans le même ordre, sinon = deadlock possible.
+
+✅ Choisis un ordre clair (par ex. lock_is_dead → mutex) et respecte-le partout.
+
+❗ Ceci est essentiel dès que tu as plus d’un mutex dans une section critique.
+
+Si tu veux, je peux passer en revue toutes tes fonctions pour te dire si l’ordre est cohérent partout.
+
+------------------
+
+🟡 Petite remarque à corriger (typo)
+Dans init_invited_philos() :
+
+philos->lock_meal_count = (pthread_mutex_t *) malloc(sizeof(pthread_mutex_t));
+if (!philos->lock_has_eaten) // ❌ erreur
+    return ;
+Tu testes lock_has_eaten deux fois, alors que tu viens d’allouer lock_meal_count.
+👉 Corriger en :
+
+if (!philos->lock_meal_count)
+    return ;
+
+----------------------
+
+1. Synchroniser le point 0	starting_time = current_time() + 50;
+2. Dans routine()	Attendre le vrai départ avec un while()
+3. Mesurer tout en now - starting_time	Ne jamais afficher current_time() brut
+4. Optionnel	Remplacer usleep() par nanosleep() si besoin
+
+-----------------
+
+void	*routine(void *arg)
+{
+	t_philos *philo = (t_philos *)arg;
+
+	// Attente active avant lancement
+	while ((long)(current_time() - philo->table->starting_time) < 0)
+		usleep(50);
+
+	// À ce stade, tout le monde commence "à 0"
+	print_state(philo, "THINK");
+	// ...
+}
+
+-----------------
+
+Et dans init_starting_time() :
+
+table->starting_time = current_time() + 50;
+
+-----------------------
+
+usleep 500 ds le utils, 1 dans le reste
